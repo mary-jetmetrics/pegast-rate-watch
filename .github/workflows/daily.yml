@@ -1,0 +1,40 @@
+name: Курс Пегаса
+
+on:
+  schedule:
+    # 03:00 UTC = 08:00 по Перми (UTC+5), по будням.
+    # Выходные пропускаем намеренно: курс на сб-вс скрипт всё равно доберёт
+    # задним числом при следующем запуске, история остаётся сплошной.
+    - cron: "0 3 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rates
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Забрать курс и отправить в Telegram
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python3 rates.py
+
+      - name: Сохранить историю
+        run: |
+          if [[ -n "$(git status --porcelain history.csv)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add history.csv
+            git commit -m "Курс за $(date -u +%F)"
+            git push
+          else
+            echo "История не изменилась"
+          fi
