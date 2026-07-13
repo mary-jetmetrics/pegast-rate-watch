@@ -21,7 +21,8 @@ import urllib.parse
 import urllib.request
 import zoneinfo
 
-API = "https://agency.pegast.ru/ExchangeRates/GetExchangeRates"
+PAGE = "https://agency.pegast.ru/ExchangeRates"
+API = f"{PAGE}/GetExchangeRates"
 TZ = zoneinfo.ZoneInfo("Asia/Yekaterinburg")  # Пермь, UTC+5
 HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.csv")
 
@@ -212,8 +213,10 @@ def build_message(history: dict[dt.date, float], today: dt.date, repo_url: str,
             lines.append(f"\nℹ️ Курс за {day.strftime('%d.%m')} пересмотрен задним "
                          f"числом: {fmt(was)} → {fmt(now)} ₽")
 
+    lines.append("")
     if repo_url:
-        lines.append(f'\n<a href="{repo_url}/blob/main/history.csv">Таблица всех наблюдений</a>')
+        lines.append(f'<a href="{repo_url}/blob/main/history.csv">Таблица всех наблюдений</a>')
+    lines.append(f'<a href="{PAGE}">Курс на сайте Пегаса</a>')
 
     lines.append("")
     lines.extend(balance_lines(rate))
