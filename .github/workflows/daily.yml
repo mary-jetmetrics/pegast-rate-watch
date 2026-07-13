@@ -10,7 +10,18 @@ on:
     # Выходные пропускаем: пятничный курс держится до понедельника, а субботу
     # с воскресеньем скрипт всё равно доберёт задним числом.
     - cron: "37 2 * * 1-5"
+    # 14:31 UTC = 17:31 МСК, по будням — вечерний предварительный курс на завтра.
+    # Пегас выставляет его после 17:30 МСК, точная минута неизвестна. Опоздание
+    # Actions здесь работает на нас: чем позже реально стартует, тем выше шанс
+    # застать уже выставленный курс. Если не застали — сообщение скажет об этом,
+    # потому что отличить "не выставлен" от "оставлен прежним" по API нельзя.
+    - cron: "31 14 * * 1-5"
   workflow_dispatch:
+    inputs:
+      preview:
+        description: "Предварительный курс на завтра вместо курса на сегодня"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,7 +40,13 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: python3 rates.py
+          PREVIEW: ${{ github.event.schedule == '31 14 * * 1-5' || inputs.preview }}
+        run: |
+          if [[ "$PREVIEW" == "true" ]]; then
+            python3 rates.py --preview
+          else
+            python3 rates.py
+          fi
 
       - name: Сохранить историю
         run: |

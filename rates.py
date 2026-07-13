@@ -7,6 +7,11 @@
 курс на сегодня уже установлен и финален. Но в волатильные дни оператор оставляет
 за собой право переставить курс несколько раз за день, поэтому последние дни мы
 перечитываем, а не считаем записанное один раз навсегда верным.
+
+Два режима:
+  * обычный — утреннее сообщение с курсом на сегодня и остатком по туру;
+  * --preview — вечернее, сразу после 17:30 МСК: заглядывает на завтра.
+    В историю предварительный курс не пишем, см. fetch_rate.
 """
 
 import argparse
@@ -223,6 +228,31 @@ def build_message(history: dict[dt.date, float], today: dt.date, repo_url: str,
     return "\n".join(lines)
 
 
+def build_preview_message(tomorrow: dt.date, rate: float, today_rate: float,
+                          repo_url: str) -> str:
+    """Вечернее сообщение: курс, который Пегас выставил на завтра."""
+    lines = ["<b>Предварительный курс на завтра</b>", ""]
+    lines.append(f"{tomorrow.day} {MONTHS[tomorrow.month - 1]}, "
+                 f"{WEEKDAYS[tomorrow.weekday()]} = {fmt(rate)} ₽")
+    lines.append("")
+    lines.append(compare_line("По сравнению с сегодня", rate, today_rate))
+    lines.append(compare_line("По сравнению с бронью", rate, BOOKING_RATE))
+
+    # API не умеет отвечать "курса на эту дату ещё нет" — на неустановленную дату он
+    # отдаёт последний известный. Поэтому совпадение с сегодняшним курсом неотличимо
+    # от "Пегас ещё не выставил новый", и молчать об этом нельзя: иначе протянутое
+    # значение прочитается как решение оператора.
+    if abs(rate - today_rate) < 0.005:
+        lines.append("")
+        lines.append("ℹ️ Совпадение с сегодняшним курсом значит одно из двух: Пегас "
+                     "оставил курс прежним или ещё не выставил новый. По API это "
+                     "не различить, окончательный курс покажет утреннее сообщение.")
+
+    lines.append("")
+    lines.append(f'<a href="{PAGE}">Курс на сайте Пегаса</a>')
+    return "\n".join(lines)
+
+
 def balance_lines(rate: float) -> list[str]:
     paid_rub = sum(p[1] for p in PAYMENTS)
     paid_eur = sum(p[3] for p in PAYMENTS)
@@ -256,6 +286,8 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true",
                    help="показать сообщение и не отправлять его")
+    p.add_argument("--preview", action="store_true",
+                   help="вечерний режим: предварительный курс на завтра")
     args = p.parse_args()
 
     today = dt.datetime.now(TZ).date()
@@ -275,7 +307,16 @@ def main() -> None:
 
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     repo_url = f"https://github.com/{repo}" if repo else ""
-    text = build_message(history, today, repo_url, revised)
+
+    if args.preview:
+        tomorrow = today + dt.timedelta(days=1)
+        rate = fetch_rate(tomorrow)
+        if rate is None:
+            raise SystemExit("Пегас не отдал курс на завтра")
+        today_rate = history.get(today, history[max(history)])
+        text = build_preview_message(tomorrow, rate, today_rate, repo_url)
+    else:
+        text = build_message(history, today, repo_url, revised)
 
     if args.dry_run:
         print("\n--- сообщение ---")
