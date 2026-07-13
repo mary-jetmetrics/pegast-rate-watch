@@ -10,8 +10,13 @@
 
 Два режима:
   * обычный — утреннее сообщение с курсом на сегодня и остатком по туру;
-  * --preview — вечернее, сразу после 17:30 МСК: заглядывает на завтра.
-    В историю предварительный курс не пишем, см. fetch_rate.
+  * --preview — курс на завтра, руками после 17:30 МСК. В историю его не пишем,
+    см. fetch_rate.
+
+Утреннее сообщение должно быть ровно одно в день и прийти гарантированно, а
+расписания GitHub Actions гарантий не дают: 13.07 запуск опоздал на 3 часа 18 минут,
+а другой в тот же день не случился вовсе. Поэтому запусков несколько (см. daily.yml),
+а отправленное отмечается в last_sent.txt: доехавший первым шлёт, остальные молчат.
 """
 
 import argparse
@@ -29,7 +34,11 @@ import zoneinfo
 PAGE = "https://agency.pegast.ru/ExchangeRates"
 API = f"{PAGE}/GetExchangeRates"
 TZ = zoneinfo.ZoneInfo("Asia/Yekaterinburg")  # Пермь, UTC+5
-HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.csv")
+HERE = os.path.dirname(os.path.abspath(__file__))
+HISTORY = os.path.join(HERE, "history.csv")
+# Дата последнего отправленного утреннего сообщения — защита от повторов, когда
+# до Пегаса доехало сразу несколько запусков подряд.
+SENT = os.path.join(HERE, "last_sent.txt")
 
 BOOKING_DATE = dt.date(2026, 7, 10)
 BOOKING_RATE = 92.44
@@ -103,6 +112,21 @@ def save_history(history: dict[dt.date, float]) -> None:
         w.writerow(["date", "eur_rub"])
         for day in sorted(history):
             w.writerow([day.isoformat(), f"{history[day]:.4f}".rstrip("0").rstrip(".")])
+
+
+def load_sent() -> dt.date | None:
+    if not os.path.exists(SENT):
+        return None
+    raw = open(SENT, encoding="utf-8").read().strip()
+    try:
+        return dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def save_sent(day: dt.date) -> None:
+    with open(SENT, "w", encoding="utf-8") as f:
+        f.write(day.isoformat() + "\n")
 
 
 Revision = tuple[dt.date, float, float]  # дата, было, стало
@@ -287,10 +311,19 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true",
                    help="показать сообщение и не отправлять его")
     p.add_argument("--preview", action="store_true",
-                   help="вечерний режим: предварительный курс на завтра")
+                   help="курс на завтра вместо курса на сегодня")
+    p.add_argument("--force", action="store_true",
+                   help="отправить, даже если сообщение за сегодня уже уходило")
     args = p.parse_args()
 
     today = dt.datetime.now(TZ).date()
+
+    # Запусков за ночь несколько, сообщение нужно одно. Дошедший первым уже всё
+    # отправил и записал историю — остальным делать нечего.
+    if not args.preview and not args.force and load_sent() == today:
+        print(f"Сообщение за {today.isoformat()} уже отправлено")
+        return
+
     history = load_history()
     added, revised = sync_history(history, today)
     if added or revised:
@@ -325,6 +358,11 @@ def main() -> None:
 
     send(text, os.environ["TG_BOT_TOKEN"], os.environ["TG_CHAT_ID"])
     print("Отправлено")
+
+    # Отметку ставим только после успешной отправки: упади мы на Telegram, следующий
+    # запуск должен попробовать снова, а не решить, что за сегодня уже всё сделано.
+    if not args.preview:
+        save_sent(today)
 
 
 if __name__ == "__main__":
