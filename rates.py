@@ -2,11 +2,12 @@
 
 Источник: внутренний API страницы agency.pegast.ru/ExchangeRates.
 
-Как Пегас ставит курс: по будням после 17:30 МСК, на следующий день. Пятничный
-курс держится всю субботу, воскресенье и понедельник. То есть к утреннему запуску
-курс на сегодня уже установлен и финален. Но в волатильные дни оператор оставляет
-за собой право переставить курс несколько раз за день, поэтому последние дни мы
-перечитываем, а не считаем записанное один раз навсегда верным.
+Как Пегас ставит курс: по будням после 17:30 МСК, на следующий день. Часто
+пятничный курс держится выходные, но не всегда — в субботу его тоже переставляют.
+То есть к утреннему запуску курс на сегодня уже установлен и финален. Но в
+волатильные дни оператор оставляет за собой право переставить курс несколько раз
+за день, поэтому последние дни мы перечитываем, а не считаем записанное один раз
+навсегда верным.
 
 Два режима:
   * обычный — утреннее сообщение с курсом на сегодня и остатком по туру;
@@ -252,25 +253,34 @@ def build_message(history: dict[dt.date, float], today: dt.date, repo_url: str,
     return "\n".join(lines)
 
 
-def build_preview_message(tomorrow: dt.date, rate: float, today_rate: float,
-                          repo_url: str) -> str:
-    """Вечернее сообщение: курс, который Пегас выставил на завтра."""
-    lines = ["<b>Предварительный курс на завтра</b>", ""]
-    lines.append(f"{tomorrow.day} {MONTHS[tomorrow.month - 1]}, "
-                 f"{WEEKDAYS[tomorrow.weekday()]} = {fmt(rate)} ₽")
-    lines.append("")
-    lines.append(compare_line("По сравнению с сегодня", rate, today_rate))
-    lines.append(compare_line("По сравнению с бронью", rate, BOOKING_RATE))
+def build_preview_message(today: dt.date, tomorrow: dt.date, tomorrow_rate: float,
+                          today_rate: float, repo_url: str) -> str:
+    """Ответ на вечерний запрос «самый актуальный курс»: завтра, иначе сегодня.
 
-    # API не умеет отвечать "курса на эту дату ещё нет" — на неустановленную дату он
-    # отдаёт последний известный. Поэтому совпадение с сегодняшним курсом неотличимо
-    # от "Пегас ещё не выставил новый", и молчать об этом нельзя: иначе протянутое
-    # значение прочитается как решение оператора.
-    if abs(rate - today_rate) < 0.005:
+    Пегас выкладывает завтрашний курс после 17:30 МСК. Если запросить раньше, API
+    молча отдаёт на завтра сегодняшнее значение — отличить «оставил прежним» от «ещё
+    не выложил» по нему нельзя. Поэтому:
+      * курс на завтра отличается от сегодняшнего → Пегас уже выложил, показываем его;
+      * совпал → выкладки, скорее всего, ещё нет, показываем актуальный сегодняшний
+        и честно говорим, что завтрашний не подтверждён.
+    """
+    posted = abs(tomorrow_rate - today_rate) >= 0.005
+    if posted:
+        lines = ["<b>Курс на завтра</b>", ""]
+        lines.append(f"{tomorrow.day} {MONTHS[tomorrow.month - 1]}, "
+                     f"{WEEKDAYS[tomorrow.weekday()]} = {fmt(tomorrow_rate)} ₽")
         lines.append("")
-        lines.append("ℹ️ Совпадение с сегодняшним курсом значит одно из двух: Пегас "
-                     "оставил курс прежним или ещё не выставил новый. По API это "
-                     "не различить, окончательный курс покажет утреннее сообщение.")
+        lines.append(compare_line("По сравнению с сегодня", tomorrow_rate, today_rate))
+        lines.append(compare_line("По сравнению с бронью", tomorrow_rate, BOOKING_RATE))
+    else:
+        lines = ["<b>Курс на сегодня</b>", ""]
+        lines.append(f"{today.day} {MONTHS[today.month - 1]}, "
+                     f"{WEEKDAYS[today.weekday()]} = {fmt(today_rate)} ₽")
+        lines.append("")
+        lines.append(compare_line("По сравнению с бронью", today_rate, BOOKING_RATE))
+        lines.append("")
+        lines.append("ℹ️ Курс на завтра Пегас ещё не выставил — на сайте пока держится "
+                     "сегодняшний. Проверьте после 17:30 МСК.")
 
     lines.append("")
     lines.append(f'<a href="{PAGE}">Курс на сайте Пегаса</a>')
@@ -343,11 +353,12 @@ def main() -> None:
 
     if args.preview:
         tomorrow = today + dt.timedelta(days=1)
-        rate = fetch_rate(tomorrow)
-        if rate is None:
+        tomorrow_rate = fetch_rate(tomorrow)
+        if tomorrow_rate is None:
             raise SystemExit("Пегас не отдал курс на завтра")
         today_rate = history.get(today, history[max(history)])
-        text = build_preview_message(tomorrow, rate, today_rate, repo_url)
+        text = build_preview_message(today, tomorrow, tomorrow_rate,
+                                     today_rate, repo_url)
     else:
         text = build_message(history, today, repo_url, revised)
 
