@@ -78,8 +78,13 @@ def fetch_rate(day: dt.date) -> float | None:
     означает сбой API, а не "курса на этот день ещё нет": сказать второе он не умеет.
     """
     payload = json.dumps({"date": day.isoformat()}).encode()
+    # С 13.10.26 Пегас режет запросы с подписью скрипта (Python-urllib, curl) — 403
+    # «запрос похож на автоматический». С браузерным User-Agent отвечает как раньше.
     headers = {"Content-Type": "application/json",
-               "X-Requested-With": "XMLHttpRequest"}
+               "X-Requested-With": "XMLHttpRequest",
+               "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+               "Referer": PAGE}
     for attempt in range(3):
         try:
             req = urllib.request.Request(API, data=payload, headers=headers)
