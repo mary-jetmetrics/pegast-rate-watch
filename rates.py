@@ -69,6 +69,28 @@ MIN_DAYS_FOR_EXTREMUM = 7
 RECHECK_DAYS = 5
 
 
+_CHROME_MAJOR: int | None = None
+
+
+def chrome_major() -> int:
+    """Основная версия текущего стабильного Chrome — для User-Agent запросов к Пегасу.
+
+    Берём у Google, а не вписываем руками: зашитая версия устаревает за пару
+    месяцев, и Пегас начинает отвечать 403. Если Google недоступен — оцениваем по
+    дате: 155 на 15.10.2026, новая версия примерно раз в 4 недели.
+    """
+    global _CHROME_MAJOR
+    if _CHROME_MAJOR is None:
+        try:
+            url = ("https://versionhistory.googleapis.com/v1/chrome/platforms/mac/"
+                   "channels/stable/versions?pageSize=1")
+            data = json.loads(urllib.request.urlopen(url, timeout=10).read().decode())
+            _CHROME_MAJOR = int(data["versions"][0]["version"].split(".")[0])
+        except Exception:
+            _CHROME_MAJOR = 155 + (dt.date.today() - dt.date(2026, 10, 15)).days // 28
+    return _CHROME_MAJOR
+
+
 def fetch_rate(day: dt.date) -> float | None:
     """Курс EUR→RUB, действующий на указанную дату.
 
@@ -79,11 +101,16 @@ def fetch_rate(day: dt.date) -> float | None:
     """
     payload = json.dumps({"date": day.isoformat()}).encode()
     # С 13.10.26 Пегас режет запросы с подписью скрипта (Python-urllib, curl) — 403
-    # «запрос похож на автоматический». С браузерным User-Agent отвечает как раньше.
-    headers = {"Content-Type": "application/json",
+    # «запрос похож на автоматический». С 15.10.26 режет и устаревший Chrome в
+    # User-Agent (130 — 403, 155 — 200), поэтому версию берём текущую, см. chrome_major.
+    major = chrome_major()
+    headers = {"Content-Type": "application/json; charset=utf-8",
                "X-Requested-With": "XMLHttpRequest",
-               "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+               "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                             f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36",
+               "sec-ch-ua": f'"Google Chrome";v="{major}", "Chromium";v="{major}", "Not(A:Brand";v="24"',
+               "sec-ch-ua-mobile": "?0",
+               "sec-ch-ua-platform": '"macOS"',
                "Referer": PAGE}
     for attempt in range(3):
         try:
