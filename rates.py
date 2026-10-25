@@ -31,9 +31,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zoneinfo
+from decimal import ROUND_HALF_UP, Decimal
 
 PAGE = "https://agency.pegast.ru/ExchangeRates"
 API = f"{PAGE}/GetExchangeRates"
+# Запасной источник. Курс Пегаса — это курс ЦБ на ту же дату × наценка, округлённый
+# до копеек: сверено по всей истории с 09.07 (108 дней, 0 расхождений). Наценка 6,75%
+# держится с 02.05.26, до этого была 6,5%.
+CBR_API = "https://www.cbr.ru/scripts/XML_daily.asp"
+PEGAS_MARKUP = Decimal("1.0675")
 TZ = zoneinfo.ZoneInfo("Asia/Yekaterinburg")  # Пермь, UTC+5
 HERE = os.path.dirname(os.path.abspath(__file__))
 HISTORY = os.path.join(HERE, "history.csv")
@@ -71,6 +77,11 @@ RECHECK_DAYS = 5
 
 _CHROME_MAJOR: int | None = None
 
+# С 25.10.26 Пегас отвечает 403 на любые запросы с серверов GitHub (адреса Microsoft),
+# даже curl с cookies со страницы курсов. С мака тот же запрос проходит. Поймав 403,
+# дальше в этом запуске считаем курс по ЦБ, см. fetch_rate_cbr.
+PEGAS_BLOCKED = False
+
 
 def chrome_major() -> int:
     """Основная версия текущего стабильного Chrome — для User-Agent запросов к Пегасу.
@@ -98,7 +109,12 @@ def fetch_rate(day: dt.date) -> float | None:
     установлен, API не отвечает ошибкой, а молча отдаёт последний известный курс
     (проверено — на год вперёд возвращает сегодняшний). Так что None здесь
     означает сбой API, а не "курса на этот день ещё нет": сказать второе он не умеет.
+
+    Если Пегас не пускает (403), курс считается по ЦБ — см. PEGAS_BLOCKED.
     """
+    global PEGAS_BLOCKED
+    if PEGAS_BLOCKED:
+        return fetch_rate_cbr(day)
     payload = json.dumps({"date": day.isoformat()}).encode()
     # С 13.10.26 Пегас режет запросы с подписью скрипта (Python-urllib, curl) — 403
     # «запрос похож на автоматический». С 15.10.26 режет и устаревший Chrome в
@@ -117,6 +133,14 @@ def fetch_rate(day: dt.date) -> float | None:
             req = urllib.request.Request(API, data=payload, headers=headers)
             raw = urllib.request.urlopen(req, timeout=20).read().decode()
             break
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                print("Пегас ответил 403 — считаем курс по ЦБ × наценка")
+                PEGAS_BLOCKED = True
+                return fetch_rate_cbr(day)
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
         except (urllib.error.URLError, TimeoutError):
             if attempt == 2:
                 raise
@@ -130,6 +154,38 @@ def fetch_rate(day: dt.date) -> float | None:
         if r["SourceCurrency"] == "EUR":
             return round(float(r["Rate"]), 4)
     return None
+
+
+def fetch_rate_cbr(day: dt.date) -> float | None:
+    """Курс Пегаса, посчитанный как курс ЦБ на дату × PEGAS_MARKUP.
+
+    ЦБ ведёт себя как API Пегаса: на воскресенье и понедельник отдаёт субботний
+    курс, а на дату, курс на которую ещё не установлен, — последний известный.
+    """
+    url = f"{CBR_API}?date_req={day.strftime('%d/%m/%Y')}"
+    for attempt in range(3):
+        try:
+            raw = urllib.request.urlopen(url, timeout=20).read().decode("cp1251")
+            break
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+
+    m = re.search(r"<CharCode>EUR</CharCode><Nominal>(\d+)</Nominal>.*?"
+                  r"<Value>([\d,]+)</Value>", raw)
+    if not m:
+        return None
+    cbr = Decimal(m.group(2).replace(",", ".")) / int(m.group(1))
+    return float((cbr * PEGAS_MARKUP).quantize(Decimal("0.01"), ROUND_HALF_UP))
+
+
+def source_note() -> list[str]:
+    """Пометка в сообщении, что курс не с сайта Пегаса, а посчитан по ЦБ."""
+    if not PEGAS_BLOCKED:
+        return []
+    return ["", "📐 Расчёт: курс ЦБ × 1,0675. Сайт Пегаса не пускает бота, "
+                "а его курс всегда равен этой формуле."]
 
 
 def load_history() -> dict[dt.date, float]:
@@ -276,6 +332,7 @@ def build_message(history: dict[dt.date, float], today: dt.date, repo_url: str,
             lines.append(f"\nℹ️ Курс за {day.strftime('%d.%m')} пересмотрен задним "
                          f"числом: {fmt(was)} → {fmt(now)} ₽")
 
+    lines.extend(source_note())
     lines.append("")
     if repo_url:
         lines.append(f'<a href="{repo_url}/blob/main/history.csv">Таблица всех наблюдений</a>')
@@ -312,9 +369,14 @@ def build_preview_message(today: dt.date, tomorrow: dt.date, tomorrow_rate: floa
         lines.append("")
         lines.append(compare_line("По сравнению с бронью", today_rate, BOOKING_RATE))
         lines.append("")
-        lines.append("ℹ️ Курс на завтра Пегас ещё не выставил — на сайте пока держится "
-                     "сегодняшний. Проверьте после 17:30 МСК.")
+        if PEGAS_BLOCKED:
+            lines.append("ℹ️ Нового курса на завтра у ЦБ пока нет — держится "
+                         "сегодняшний. Проверьте позже.")
+        else:
+            lines.append("ℹ️ Курс на завтра Пегас ещё не выставил — на сайте пока держится "
+                         "сегодняшний. Проверьте после 17:30 МСК.")
 
+    lines.extend(source_note())
     lines.append("")
     lines.append(f'<a href="{PAGE}">Курс на сайте Пегаса</a>')
     return "\n".join(lines)
